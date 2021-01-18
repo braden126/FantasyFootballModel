@@ -1,6 +1,27 @@
+---
+title: "Fantasy Football Regression Model"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Introduction
+
+Fantasy football is a very unpredictable hobby. Most player season projections can end up being wildly inaccurate due to the unpredictability of the sport as an single injury or coaching change can have a large effect on a players fantasy production. The goal of this model is to use a player's previous year production to make a projection of a players points per game in the following season. This model is intended to complement other information that is not captured in the data used for this model such as team changes, coaching changes, or team personal changes in the offseason.
+
+## Gathering data
+
+The main source of data for this model is obtained from Pro Football Focus. The data contains end of season game stats for offensive players and their fantasy points from 2008-2018. The other data comes from the NFLScrapR package that gathers play by play data for every NFL game. This data is used to add expected points added, win probability added, and total snaps for each player. This data only covers the 2009-2017 seasons which means is does limit the size of the data but that is a fair trade off for more detailed data.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+
 library(tidyverse)
 library(rebus)
 library(Metrics)
+library(readxl)
+
+Raw_Data10yrs_v3 <- read_excel("Raw Data10yrs_v3.xlsx")
+
 
 #gathering data from NFLscrapR for play by play Expected points added and win probability added per play, along with snaps per season
 stats2017 <- read_csv(url("https://github.com/ryurko/nflscrapR-data/raw/master/play_by_play_data/regular_season/reg_pbp_2017.csv"))
@@ -12,20 +33,20 @@ stats2011 <- read_csv(url("https://github.com/ryurko/nflscrapR-data/raw/master/p
 stats2010 <- read_csv(url("https://github.com/ryurko/nflscrapR-data/raw/master/play_by_play_data/regular_season/reg_pbp_2010.csv"))
 stats2009 <- read_csv(url("https://github.com/ryurko/nflscrapR-data/raw/master/play_by_play_data/regular_season/reg_pbp_2009.csv"))
 
+```
+
+## Staging NFLScrapR data
+
+All the data from NFLScrapR needs to be joined together and a new year column is created to match with the year column in the Pro Football Focus to be joined later. For the Pro Football Focus data, the name column needs to be changed to match the NFLScrapR name column so they can be joined together later. To do this, the first character is selected and added to the last name to match the format of NFLScrapR.
+
+```{r}
+
 #joining all years together
 Epa <- rbind(stats2017, stats2016, stats2015, stats2013, stats2012, stats2011, stats2010, stats2009)
 
 #creates a column to be used in join with other dataset
 Epa <- Epa %>%
   mutate(Year = as.character(format(game_date,"%Y")))
-
-#selects only RBs
-rbepa <- Epa %>%
-  filter(play_type == "run" & qb_scramble == 0 & !is.na(epa) & !is.na(wpa)) %>% #selects only plays where ball is passed and removes few plays where EPA is not calculated
-  group_by(rusher_player_name, Year ) %>%
-  summarise(averageEpa = mean(epa), totalEpa = sum(epa), averageWpa = mean(wpa), totalWpa = sum(wpa), snaps = n()) %>%
-  arrange(rusher_player_name, Year) 
-
 
 #add new column to match the NFLScrapR name format to be used in joining datasets
 Raw_Data10yrs_v3$joinname = substr(Raw_Data10yrs_v3$Name, 1, 1) 
@@ -35,6 +56,24 @@ Raw_Data10yrs_v3$joinname = paste(Raw_Data10yrs_v3$joinname, str_extract(Raw_Dat
 ))
 Raw_Data10yrs_v3$joinname = gsub("  ", ".", Raw_Data10yrs_v3$joinname)
 Raw_Data10yrs_v3$Year = as.character(Raw_Data10yrs_v3$Year)
+
+```
+
+## Running Back Data
+
+To start, all data for running backs will be gathered. To do this, the NFLScrapR data is filtered to select only run plays and each players EPA, WPA, and snaps are calculated for each season. Then the Pro Football Focus data is filtered to only select running backs and only the top 75 runningbacks in each season to make sure only fantasy relevant players are selected. As a result of fantasy football projections mostly being based on a player's previous year production, the lag function is used to select data from the players previous season. For rookie player seasons there is nothing to project in this model unless college stats are used which are beyond the scope of this model so those seasons are removed from the dataset.
+
+The data is then joined to the NFLScrapR dataset using the specific name and year columns made for the join in each dataset. Once they are joined the lag function is used to gather the stats from the NFLScrapR data in the same way as before. Finally, only players with NFLScrapR data are selected and NA values are removed as the NFL ScrapR package occasionally has errors in gathering data due how the data is reported before being scraped.
+
+```{r}
+
+#selects only RBs
+rbepa <- Epa %>%
+  filter(play_type == "run" & qb_scramble == 0 & !is.na(epa) & !is.na(wpa)) %>% #selects only plays where ball is run and removes few plays where EPA is not calculated
+  group_by(rusher_player_name, Year ) %>%
+  summarise(averageEpa = mean(epa), totalEpa = sum(epa), averageWpa = mean(wpa), totalWpa = sum(wpa), snaps = n()) %>%
+  arrange(rusher_player_name, Year) 
+
 
 rbs <- Raw_Data10yrs_v3 %>%
   filter(FantPos == "RB" & PosRank <= 75 & !is.na(PosRank)) %>% #selects top 75 RBs to only select fantasy relevant RBs
@@ -67,14 +106,20 @@ rbsfull <- rbsfull %>%
 rbsfull <- rbsfull %>% 
   filter(!is.na(prev_year_averageWpa))
 
-#RB model
+head(rbsfull)
 
-#splitting test/train data
+```
+
+## Running Back Model
+
+The data is split into test and train sets and then plugged into the linear model with all the possible predictor variables to project the points per game for each running back. After calibrating the model to select the features found significant, it has an R-squared of 0.4245 and an RMSE of 4.69065. Not bad for a sport as unpredictable as the NFL. The most useful features were previous year points per game, targets, snaps, and age. Previous year points per game is expected as that is the variable being predicted and is a good base for the model to use. Targets having a high p-value seems to confirm that running backs that are involved in the passing game are likely to have more touches on the ball and more chances for points while running backs that do not receive targets will have less chances for points. Snaps is also related to this as running backs that can catch generally are on the field more plays, which means more chances for points as well. Age is also an expected variable, as football players tend to perform at a lower level at higher ages, their fantasy points also decline which means that younger players are more likely to have more points while older players are more likely to have less points. 
+
+```{r, set.seed(999)}
 set.seed(999)
+#splitting test/train data
 sample <- sample.int(n = nrow(rbsfull), size = floor(.75*nrow(rbsfull)), replace = F)
 rbtrain <- rbsfull[sample, ]
 rbtest  <- rbsfull[-sample, ]
-
 
 #starting with all previous year variables
 rbmod <- lm(PPRPG ~ prev_year_PPRPG + prev_year_rank + Age + prev_year_G + prev_year_GS + prev_year_RushingY_A + prev_year_Rushingatt +
@@ -84,7 +129,7 @@ rbmod <- lm(PPRPG ~ prev_year_PPRPG + prev_year_rank + Age + prev_year_G + prev_
 summary(rbmod)
 
 #trimmed unneeded variables
-rbmodtrimmed <- lm(PPRPG ~ prev_year_PPRPG + Age + prev_year_G + prev_year_GS + prev_year_RushingY_A
+rbmodtrimmed <- lm(PPRPG ~ prev_year_PPRPG + Age + prev_year_G + prev_year_GS + prev_year_RushingY_A 
                    + prev_year_averageEpa + prev_year_averageWpa + prev_year_ReceivingTgt  + prev_year_snaps, data = rbtrain)
 
 summary(rbmodtrimmed)
@@ -99,8 +144,15 @@ rbrsme <- rbresults %>%
 
 rmse(rbrsme$PPRPG,rbrsme$rbpred)
 
+head(rbresults)
+```
 
-#wr
+## Wide Reciever Data
+
+This data is wrangled mostly the same way as the running back data except the NFLScrapR play type is changed to pass and the filtered position is changed to wide receiver.
+
+```{r}
+
 wrepa <- Epa %>%
   filter(play_type == "pass" & qb_scramble == 0 & !is.na(epa) & !is.na(wpa)) %>% #selects only plays where ball is passed and removes few plays where EPA is not calculated
   group_by(receiver_player_name, Year ) %>%
@@ -137,7 +189,13 @@ wrsfull <- wrsfull %>%
 wrsfull <- wrsfull %>% 
   filter(!is.na(prev_year_averageWpa))
 
-#WR model
+```
+
+## Wide Reciever Model
+
+The wide receiver model after being optimized comes to an R-squared of 0.3696 and a RMSE of 3.320411 The most useful features in this model were previous year points per game and age again, as well as rushing touchdowns, average win probability added, and receiving targets. Rushing touchdowns tells us that receivers that can get touchdowns on the few carries they get are a big indicator of their ability. Win probability added likely means that wide receivers that are or are not making big catches in important moments explains a large portion of their points. Receiving targets is a clear statistic that shows that the amount of opportunity a player has is an important indicator of points.
+
+```{r}
 
 #splitting test/train data
 set.seed(999)
@@ -153,8 +211,8 @@ wrmod <- lm(PPRPG ~ prev_year_PPRPG + prev_year_rank + Age + prev_year_G + prev_
 summary(wrmod)
 
 #trimmed unneeded variables
-wrmodtrimmed <- lm(PPRPG ~ prev_year_PPRPG + prev_year_rank + Age + prev_year_G + prev_year_GS + prev_year_Rushingatt + prev_year_RushingTD +
-                      + prev_year_averageWpa + prev_year_totalWpa + prev_year_ReceivingTgt + prev_year_snaps, data = wrtrain)
+wrmodtrimmed <- lm(PPRPG ~ prev_year_PPRPG + prev_year_rank + Age + prev_year_Rushingatt + prev_year_RushingTD + 
+                      prev_year_averageWpa + prev_year_totalWpa + prev_year_ReceivingTgt + prev_year_snaps, data = wrtrain)
 
 summary(wrmodtrimmed)
 
@@ -168,8 +226,17 @@ wrrsme <- wrresults %>%
 
 rmse(wrrsme$PPRPG,wrrsme$wrpred)
 
+head(wrresults)
 
-#qb
+```
+
+## Quarterback Data
+
+
+This data for quarterbacks is also wrangled mostly the same way as the running backs and wide receivers but with the filtered position as Quarterback.
+
+```{r}
+
 qbepa <- Epa %>%
   filter(play_type == "pass" & !is.na(epa) & !is.na(wpa)) %>% #this time qb scrambles do not need to be removed 
   group_by(passer_player_name, Year ) %>%
@@ -206,9 +273,13 @@ qbsfull <- qbsfull %>%
 #removes any player's rookie year since we have no stats to predict and players that only played one year
 qbsfull <- qbsfull %>% 
   filter(!is.na(prev_year_averageWpa))
+```
 
-#QB model
+## Quarterback Model
 
+The quarterback model after being optimized comes to an R-squared of 0.5002  and a RMSE of 4.369192. The most useful features in this model were again previous year points per game and age, along with passing touchdowns, rushing attempts, and passing completions. Passing touchdowns being found useful in the quarterback model while rushing touchdowns and receiving touchdowns were not found significant in the running back and wide receiver models is interesting. It seems to suggest that passing touchdowns are more consistent for quarterbacks. Rushing attempts likely means that quarterbacks that rush have more chances to earn points with the ball as they can run when a play does not work while quarterbacks unwilling to rush will absorb more negative plays when a play does not work. Passing completions is not a very exciting feature but likely indicates that a quarterback's accuracy is important to their score. 
+
+```{r}
 #splitting test/train data
 set.seed(999)
 sample <- sample.int(n = nrow(qbsfull), size = floor(.75*nrow(qbsfull)), replace = F)
@@ -237,4 +308,12 @@ qbrsme <- qbresults %>%
   filter(!is.na(qbpred))
 
 rmse(qbrsme$PPRPG,qbrsme$qbpred)
+
+head(qbresults)
+
+```
+
+## Results
+
+The accuracy of the models is not perfect but I believe it will still be useful in predicting which players will have good seasons based on their previous season production. The models are able to explain 35 to 50 percent of the variance in points per game which make them a useful tool considering how many events not captured in this data can have an effect on a player's points per game. This model will have a strong impact when combined with other information like team changes, coaching changes, and team personal changes in the offseason.
 
